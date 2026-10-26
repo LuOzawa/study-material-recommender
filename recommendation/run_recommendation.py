@@ -15,7 +15,6 @@ import argparse
 import sys
 import logging
 import os
-import pymysql
 import pandas as pd
 
 from usercf import compute_usercf
@@ -45,6 +44,8 @@ log = logging.getLogger(__name__)
 
 
 def get_connection():
+    # 惰性导入：纯离线评测（evaluate_offline.py --source synthetic）不需要数据库驱动
+    import pymysql
     return pymysql.connect(**DB_CONFIG)
 
 
@@ -101,8 +102,14 @@ def _diversify_per_user(merged_df: pd.DataFrame, top_n: int) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
-def merge_recommendations(*dfs) -> pd.DataFrame:
-    """Merge multiple recommendation DataFrames by normalizing and blending scores."""
+def blend_scores(*dfs) -> pd.DataFrame:
+    """
+    Normalize + weight + blend multiple algorithm outputs into one score per
+    (user_id, material_id) pair, WITHOUT the final diversification step.
+
+    Split out of ``merge_recommendations`` so that the offline evaluator can
+    reuse exactly the same blending rules as production.
+    """
     combined = pd.concat(dfs, ignore_index=True)
     if combined.empty:
         return combined
@@ -139,9 +146,15 @@ def merge_recommendations(*dfs) -> pd.DataFrame:
         .rename(columns={"weighted_score": "score"})
     )
     merged["score"] = merged["score"].round(6)
+    return merged
 
-    diversified = _diversify_per_user(merged, TOP_N)
-    return diversified
+
+def merge_recommendations(*dfs) -> pd.DataFrame:
+    """Blend algorithm outputs and apply the production diversification step."""
+    merged = blend_scores(*dfs)
+    if merged.empty:
+        return merged
+    return _diversify_per_user(merged, TOP_N)
 
 
 def save_recommendations(conn, rec_df: pd.DataFrame, user_id=None):
