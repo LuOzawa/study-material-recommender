@@ -1,6 +1,7 @@
 package com.recommend.security;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import jakarta.annotation.PostConstruct;
@@ -62,9 +63,19 @@ public class JwtUtil {
         return extractClaims(token).getSubject();
     }
 
+    /**
+     * 校验 token 是否属于该用户且未过期。
+     *
+     * 过期、签名错误、格式非法的 token 一律返回 false，不向外抛异常——
+     * 让调用方（过滤器/拦截器）只关心"能不能放行"，避免漏 catch 导致 500。
+     */
     public boolean isTokenValid(String token, UserDetails userDetails) {
-        String username = extractUsername(token);
-        return username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        try {
+            String username = extractUsername(token);
+            return username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        } catch (JwtException | IllegalArgumentException e) {
+            return false;
+        }
     }
 
     private boolean isTokenExpired(String token) {
