@@ -26,7 +26,7 @@
 | 推荐模块（协同过滤 + 内容推荐） | ✅ 已实现 | 4 路算法加权融合，夜间定时刷新，支持按用户刷新 |
 | 推荐反馈闭环（点赞/踩影响推荐） | ✅ **已实现并验证** | 新增 `FeedbackService` + 3 个接口 + 前端「有用/没用」按钮；点踩的资料会被剔除出推荐列表，点赞的加权，详见第三节 |
 | 数据分析模块（画像 / 热度 / 趋势 / 漏斗） | ✅ 已实现 | 6 个统计接口；行为趋势窗口支持 `?days=`（7~365 天），旧数据也能出图，详见 9.2 |
-| Hadoop 分布式存储与计算 | 🟡 **只完成存储侧** | HDFS 客户端 + 定时 CSV 导出已实现；**没有 MapReduce/Spark 作业代码**，计算仍在单机 Python 里做 |
+| Hadoop 分布式存储与计算 | ✅ 存储 + 计算（**本地模式实测**） | HDFS 客户端 + 定时分区 CSV 导出 + **MapReduce 热度聚合作业**，并做了单机 vs MapReduce 的实测对比。未在真实集群上跑过，见第五节 |
 | AI 大模型模块 | ✅ 代码完成，**需自备 API Key** | 4 个能力齐全；不配 `DEEPSEEK_API_KEY` 时接口返回"未启用"提示而非报错 |
 | 管理员模块 | ✅ 已实现 | 用户/资料/分类管理、批量审核、日志查看、数据快照备份 |
 | 单元测试 / 接口测试 | ❌ **仓库内没有任何测试代码** | `src/test` 不存在；文档提到的 JUnit/Postman 测试未随仓库提供 |
@@ -34,14 +34,19 @@
 | 论文中的实验数据 | ✅ **有方法有数据（含模拟用户）** | 留一法评测可复现；原始 4 用户只有 3 人能参与，故提供灌数脚本把规模做到 200 用户，产出完整对比表。**论文需注明数据含 200 个模拟用户**（详见 4.4） |
 | 用户行为埋点完整性 | 🟡 5 类动作有埋点（已补 COLLECT） | 收藏已补埋点；评论仍不记（`user_behaviors.action` 枚举里没有 COMMENT），详见 9.3 |
 
-**结论**：功能完整的可运行系统。此前记录的三块空缺中，**「用户反馈闭环」与
-「离线评测」都已补齐**，只剩一块：
+**结论**：功能完整、四个模块都落地的可运行系统。此前记录的三块空缺
+（反馈闭环 / 离线评测 / Hadoop 计算）**本次全部补齐**：
 
-- **Hadoop 计算**（只做了存储侧，没有 MapReduce/Spark）—— 见第五节
+| 空缺 | 现状 |
+| --- | --- |
+| 用户反馈闭环 | ✅ 已实现并验证（9.1） |
+| 离线评测 | ✅ 有方法有数据，200 用户规模（第四节） |
+| Hadoop 计算 | ✅ MapReduce 作业 + 实测对比（第五节），但只在本地模式跑过 |
 
-评测已经能产出 200 用户规模的完整对比表（见 4.4），但**那 200 个用户里
-有 196 个是脚本按学科偏好生成的模拟用户**，论文里必须注明这一点，
-结论只能限定为「在模拟数据上融合与反馈均带来正向收益」。
+需要如实说明的两点：
+
+1. 评测用的 200 个用户里 **196 个是脚本生成的模拟用户**，论文必须注明
+2. MapReduce 在现有数据规模下**比 MySQL 慢**，这是实测结果，不是实现缺陷
 
 ---
 
@@ -94,7 +99,9 @@
 │       │   ├── entity/                   #   10 个 JPA 实体
 │       │   ├── repository/               #   11 个 Repository
 │       │   ├── security/                 #   JwtUtil / JwtFilter / UserDetailsService
-│       │   └── service/                  #   11 个业务服务（含 FeedbackService）
+│       │   ├── hadoop/                   #   ★ MapReduce 作业（HadoopHotnessJob）
+│       │   └── service/                  #   12 个业务服务（含 FeedbackService /
+│       │                                 #    HadoopBenchmarkService）
 │       └── resources/
 │           ├── application.yml           #   全部配置外置为环境变量
 │           └── logback-spring.xml
@@ -351,14 +358,17 @@ python seed_synthetic_users.py --cleanup --apply         # 一键撤销
 
 ---
 
-## 五、Hadoop 部分（说明清楚：只有存储侧）
+## 五、Hadoop 部分（存储 + 计算）
 
-### 5.1 已实现
+> 这一节此前叫「只有存储侧」——因为项目里只有 HDFS 读写，没有任何计算作业，
+> 「基于 Hadoop 的推荐系统」这个题目里的「计算」是空的。本次补上了 MapReduce 作业，
+> 并做了单机 vs MapReduce 的实测对比。
+
+### 5.1 存储侧
 
 - `HadoopConfig`：构造 `FileSystem`，**HDFS 连不上时自动回退本地文件系统**
   （`FileSystem.getLocal`），所以没有 Hadoop 集群也能跑通整个流程。
-- `HdfsService`：资料文件上传/下载/删除，含路径穿越防护
-  （`normalize` 后拒绝绝对路径与 `..`）。
+- `HdfsService`：资料文件上传/下载/删除，含路径穿越防护。
 - `HadoopDatasetExportService`：每天 2:30 把 `user_behaviors`、`user_ratings`
   导出为 Hive 风格分区目录的 CSV：
 
@@ -371,14 +381,107 @@ python seed_synthetic_users.py --cleanup --apply         # 一键撤销
 
   导出失败时自动回退写本地 `storage/hadoop-export/`，并把失败原因写进返回结果。
 
-### 5.2 未实现（论文若要写这一章必须补）
+### 5.2 计算侧（新增）
 
-- ❌ 没有 **MapReduce / Spark 作业**代码
-- ❌ 没有把 CSV 灌进 Hive 外部表的 DDL
-- ❌ 没有「单机 vs 集群」的性能对比实验
+`backend/.../hadoop/HadoopHotnessJob.java` —— 一个标准的 MapReduce 作业，
+算「资料热度排行榜」：
 
-现状是「用 HDFS 当归档存储 + 为将来上集群准备数据」，不是「用 Hadoop 做计算」。
-答辩时这一点要如实说明，否则容易被追问。
+```
+Map     : CSV 每行 → (material_id, 行为权重)
+Shuffle : 按 material_id 分组
+Reduce  : 同 material_id 的权重求和
+Driver  : 结果按权重降序取 TopN
+```
+
+行为权重（与 SQL 侧共用同一份定义，保证两条链路口径一致）：
+
+| 行为 | 权重 |
+| --- | --- |
+| `VIEW` | 1.0 |
+| `LIKE` | 2.0 |
+| `COLLECT` | 2.5 |
+| `RATE` | 1.5 |
+| `DOWNLOAD` | 2.0 |
+| `DISLIKE` | −1.0 |
+
+**两种运行方式**：
+
+| 方式 | 说明 |
+| --- | --- |
+| 本地模式（`LocalJobRunner`） | `mapreduce.framework.name=local`，不需要搭集群，同一份代码可直接跑 |
+| 集群模式 | 打成 jar 后 `hadoop jar ...` 提交到真实集群（代码未改动） |
+
+### 5.3 单机 vs MapReduce 实测对比
+
+新增接口（仅 ADMIN）：
+
+```
+POST /api/admin/hadoop/export        # 先导出行为数据
+POST /api/admin/hadoop/benchmark?topN=10   # 跑对比
+```
+
+两条链路用同一份导出数据、同一套权重，输出 TopN 并校验结果是否一致。
+
+**实测环境**：Windows + JDK 17 + MySQL 8，Hadoop 3.3.6 `LocalJobRunner`（单机单 reducer）。
+数据量通过在临时库里复制 `user_behaviors` 行构造，真实库未改动。
+
+| 数据量 | MySQL `GROUP BY` | MapReduce | 倍数 | 结果一致 |
+| --- | --- | --- | --- | --- |
+| 2,963 行 | **11 ms** | 5,544 ms | 504× | ✅ |
+| 22,404 行 | **68 ms** | 5,105 ms | 75× | ✅ |
+| 290,162 行 | **971 ms** | 5,092 ms | 5.2× | ✅ |
+
+可以读出两条曲线：
+
+1. **MySQL 基本线性增长**：11 → 68 → 971 ms（数据量涨 98 倍，耗时涨 88 倍）
+2. **MapReduce 耗时几乎不变**：5,544 → 5,105 → 5,092 ms
+   —— 说明在这个量级上，作业启动、切片、序列化、落盘这些**固定开销**占了绝大部分，
+   真正的聚合计算微乎其微
+
+**这组数字该怎么写进论文**：
+
+> 在当前测试规模（万级到十万级）下，MapReduce 反而比 MySQL 单机聚合慢 5~500 倍。
+> 按两条曲线的斜率粗略外推，MySQL 的耗时会在**百万行量级**追平 MapReduce 的
+> 约 5 秒固定开销；再往上（千万级以上，单机内存/IO 成为瓶颈时）才轮到 MapReduce
+> 的横向扩展优势体现。
+
+**不要写成「Hadoop 提升了性能」** —— 这不是实测结论。正确写法是
+「Hadoop 的价值在于数据量超出单机能力后的可扩展性，本项目在现有数据规模下
+尚未进入该区间，因此改用 Hadoop 并不划算」，并附上这张实测表。
+
+### 5.4 仍然没有做的
+
+- ❌ **没有在真实集群上跑过**：只验证了 `LocalJobRunner` 本地模式。
+  上集群需要 HDFS + YARN，且代码里的输入路径要改成 HDFS URI。
+- ❌ **没有把 CSV 灌进 Hive 外部表的 DDL**（当前直接读 CSV）。
+- ❌ **只有一个 reducer**：本地模式固定 `setNumReduceTasks(1)`，
+  集群上应改成多 reducer 才有并发收益。
+
+### 5.5 Windows 上跑 MapReduce 的前置条件
+
+Hadoop 在 Windows 上需要 `winutils.exe` 与 `hadoop.dll`，否则会报：
+
+```
+FileNotFoundException: HADOOP_HOME and hadoop.home.dir are unset
+UnsatisfiedLinkError: 'boolean org.apache.hadoop.io.nativeio.NativeIO$Windows.access0(...)'
+```
+
+处理方式（**不要把二进制放进仓库**）：
+
+```bash
+# 1) 取与 hadoop-client 版本一致的 winutils（本项目是 3.3.6）
+mkdir -p /tmp/hadoop-win/bin && cd /tmp/hadoop-win/bin
+curl -LO https://raw.githubusercontent.com/cdarlint/winutils/master/hadoop-3.3.6/bin/winutils.exe
+curl -LO https://raw.githubusercontent.com/cdarlint/winutils/master/hadoop-3.3.6/bin/hadoop.dll
+
+# 2) 启动前设置（hadoop.dll 必须在 PATH 里，否则会 UnsatisfiedLinkError）
+export HADOOP_HOME=/tmp/hadoop-win
+export PATH=/tmp/hadoop-win/bin:$PATH
+```
+
+> 未配置时接口不会报错，而是**自动退回进程内等价实现**（`mode=IN_PROCESS`），
+> 结果与 MapReduce 完全一致，但返回体里的 `conclusion` 会明确写出
+> 「这组耗时不能用于比较 Hadoop 与 MySQL」。这样在 Linux/集群环境仍能拿到真实数字。
 
 ---
 
@@ -496,7 +599,8 @@ python run_recommendation.py --user-id 2     # 只刷某个用户
 
 ### 管理 `/api/admin`（全部 ADMIN）
 
-`/users` `/materials` `/categories` `/logs` `/backup` `/hadoop/export`
+`/users` `/materials` `/categories` `/logs` `/backup`
+`/hadoop/export` `/hadoop/export/latest` `/hadoop/benchmark`（单机 vs MapReduce 对比）
 
 详见各 Controller 源码。
 
@@ -634,7 +738,7 @@ GET /api/analytics/dashboard?days=365     → 覆盖近一年，旧演示数据�
 | 级别 | 问题 | 说明 |
 | --- | --- | --- |
 | 🟠 | **无任何测试代码** | `src/test` 不存在，仓库里也没有 Postman 集合。只能手工验证 |
-| 🟠 | **Hadoop 只用到存储** | 没有 MapReduce/Spark 作业，见第五节 |
+| 🟡 | **Hadoop 只在本地模式验证过** | MapReduce 作业已实现并有实测对比，但没在真实集群（HDFS+YARN）上跑过，见 5.4 |
 | 🟠 | **推荐算法无离线评测** | 没有 Precision@K / Recall@K / 覆盖率等指标，无法证明效果 |
 | 🟡 | `sql/init.sql` 是 `mysqldump` 全量导出 | 开头即 `DROP TABLE`，误执行会清库（已在文件头加警示） |
 | 🟡 | 数据规模很小 | 4 个用户、31 条资料、102 条行为。UserCF 在这么小的数据上意义有限，冷启动问题严重 |
@@ -646,23 +750,22 @@ GET /api/analytics/dashboard?days=365     → 覆盖近一年，旧演示数据�
 
 ## 十、后续工作建议
 
-> 原第 1 项「补反馈闭环」、第 2 项「补推荐评测」、第 3 项「补数据规模」均已完成
-> （见 9.1 / 第四节 / 4.4）。下面按剩余项排序。
+> 原列的「补反馈闭环 / 补推荐评测 / 补数据规模 / 补 Hadoop 计算」**本次全部完成**
+> （见 9.1 / 第四节 / 第五节）。下面是真正还没做的。
 
-1. **补 Hadoop 计算**：写一个 MapReduce 或 Spark 作业，把 `dt=*` 分区 CSV 聚合成
-   「资料热度 Top100」，与 MySQL 直接查做耗时对比，才有「Hadoop 必要性」的论据。
-   这是目前唯一还没动的功能块。
-2. **补测试**：至少给 `AuthService`、`MaterialService`、`RecommendationService`、
-   `FeedbackService` 写 JUnit + MockMvc；Python 侧给 `metrics.py` 的纯函数写 pytest
-   （它已经是无副作用设计，很好测）。
+1. **补测试**：这是现在最大的短板。至少给 `AuthService`、`MaterialService`、
+   `RecommendationService`、`FeedbackService` 写 JUnit + MockMvc；
+   Python 侧给 `metrics.py` 的纯函数写 pytest（它已是无副作用设计）。
+2. **把 MapReduce 上真实集群**：现在只验证了 `LocalJobRunner`。上集群需要
+   把输入路径改成 HDFS URI、把 `setNumReduceTasks(1)` 改成多 reducer，
+   再跑一次 5.3 的对比表 —— 那张表才是「分布式」的完整论据。
 3. **做融合权重调参实验**：现在权重（0.3/0.3/0.2/0.2）是拍出来的。
-   用 `evaluate_offline.py` 做一组网格搜索，找出留一法下最优的权重组合——
-   这本身就是论文里一章实验内容，而且现在有数据能跑了。
+   用 `evaluate_offline.py` 做网格搜索找最优组合，这本身就是一章实验。
 4. **给评论补埋点**：给 `user_behaviors.action` 枚举加 `COMMENT`，
    在 `addComment()` 里写一行（见 9.3）。
-5. **答辩前想清楚冒拟数据的表述**：如果决定保留 200 个模拟用户，
-   论文和答辩里都要主动说明「数据构成 = 4 真实用户 + 200 模拟用户」，
-   并解释模拟规则。这比被老师问出来要好。
+5. **答辩前想清楚模拟数据的表述**：论文和答辩里主动说明
+   「数据构成 = 4 真实用户 + 200 模拟用户，模拟数据按学科偏好规则生成」，
+   比被老师问出来要好。
 
 ---
 

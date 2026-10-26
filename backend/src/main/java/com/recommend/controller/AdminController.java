@@ -6,6 +6,7 @@ import com.recommend.entity.Material;
 import com.recommend.entity.User;
 import com.recommend.repository.UserRepository;
 import com.recommend.service.AdminService;
+import com.recommend.service.HadoopBenchmarkService;
 import com.recommend.service.HadoopDatasetExportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -26,6 +27,7 @@ public class AdminController {
 
     private final AdminService adminService;
     private final HadoopDatasetExportService hadoopDatasetExportService;
+    private final HadoopBenchmarkService hadoopBenchmarkService;
     private final UserRepository userRepository;
 
     @GetMapping("/users")
@@ -124,5 +126,19 @@ public class AdminController {
     @GetMapping("/hadoop/export/latest")
     public ApiResponse<Map<String, Object>> getLatestHadoopExport() throws Exception {
         return ApiResponse.success(hadoopDatasetExportService.getLatestExportSummary());
+    }
+
+    /**
+     * 资料热度计算对比：MySQL 单机聚合 vs Hadoop MapReduce（本地模式）。
+     *
+     * <p>两条链路用同一份导出数据、同一套行为权重，输出 TopN 排行榜与耗时，
+     * 并校验结果是否一致。用于论文里讨论「什么规模下才需要上 Hadoop」。</p>
+     *
+     * <p>调用前需要先执行 {@code POST /api/admin/hadoop/export} 导出数据。</p>
+     */
+    @PostMapping("/hadoop/benchmark")
+    public ApiResponse<Map<String, Object>> benchmarkHotness(
+            @RequestParam(defaultValue = "20") int topN) throws Exception {
+        return ApiResponse.success(hadoopBenchmarkService.benchmark(topN));
     }
 }
