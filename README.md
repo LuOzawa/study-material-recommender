@@ -1,5 +1,9 @@
 # 基于 Hadoop 的考研参考资料推荐系统
 
+[![CI](https://github.com/LuOzawa/study-material-recommender/actions/workflows/ci.yml/badge.svg)](https://github.com/LuOzawa/study-material-recommender/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+
 面向考研学生的资料推荐与学习辅助平台。用户注册后可浏览/搜索/评分/收藏考研资料，
 系统结合**协同过滤 + 矩阵分解 + 内容特征**四路算法生成个性化推荐，
 并用 **Hadoop HDFS** 做行为数据的离线归档与训练集导出。
@@ -864,6 +868,27 @@ GET /api/analytics/dashboard?days=365     → 覆盖近一年，旧演示数据�
 | `sql/init.sql.mojibake.bak` | 早期编码损坏的备份，无语义 |
 
 **不包含 `.env` 与任何真实口令/密钥。**
+
+## 附：自动化测试
+
+```bash
+cd backend
+mvn test          # 10 个用例，无需数据库
+```
+
+`src/test/java/com/recommend/security/JwtUtilTest.java` 覆盖鉴权链路的根：
+
+| 用例 | 断言的行为 |
+|---|---|
+| 签发/取回 | token 能取回原用户名 |
+| 同用户校验 | 未过期 token 通过 |
+| **他人 token** | 校验失败 —— 防止横向越权 |
+| 过期 token | 校验失败 |
+| 篡改 token | `extractUsername` 抛 `JwtException`，`isTokenValid` 返回 `false`（不抛，避免调用方漏 catch 得 500） |
+| 异签 token | 其他密钥签发的 token 无法解析 |
+| 弱密钥自检 | 密钥为空/不足 32 字节时启动即失败 |
+
+CI 每次 push 都会跑（见徽章），日志里可看到 `Tests run: 10, Failures: 0`。
 
 ## 十二、许可
 
