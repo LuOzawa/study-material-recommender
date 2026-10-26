@@ -17,6 +17,9 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AnalyticsService {
 
+    /** 行为趋势图默认时间窗口（天） */
+    private static final int DEFAULT_TREND_DAYS = 14;
+
     private final UserBehaviorRepository behaviorRepository;
     private final MaterialRepository materialRepository;
     private final UserRepository userRepository;
@@ -27,12 +30,23 @@ public class AnalyticsService {
      * Analytics dashboard payload (single endpoint for all charts).
      */
     public Map<String, Object> getDashboardData() {
+        return getDashboardData(DEFAULT_TREND_DAYS);
+    }
+
+    /**
+     * 看板数据。
+     *
+     * @param trendDays 行为趋势图的时间窗口（天）。原实现写死 14 天，
+     *                  一旦演示数据超过两周，这个图就永远是空白的。
+     *                  现在可通过 /api/analytics/dashboard?days=90 指定。
+     */
+    public Map<String, Object> getDashboardData(int trendDays) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("stats", getSummaryStats());
         data.put("hotness", getMaterialHotness());
         data.put("userPhase", getUserStudyPhaseDistribution());
         data.put("actionDistribution", getBehaviorActionDistribution());
-        data.put("behaviorTrend", getBehaviorTrend(14));
+        data.put("behaviorTrend", getBehaviorTrend(trendDays));
         data.put("materialStatus", getMaterialStatusDistribution());
         data.put("categoryHotness", getCategoryHotness());
         data.put("categoryQuality", getCategoryQuality());
@@ -123,7 +137,9 @@ public class AnalyticsService {
      * [{date, view, like, dislike, collect, rate, download, total}]
      */
     public List<Map<String, Object>> getBehaviorTrend(int days) {
-        int safeDays = Math.max(7, Math.min(days, 60));
+        // 原实现把窗口夹在 7~60 天。演示/答辩时数据往往是几个月前造的，
+        // 60 天仍然取不到，趋势图会是空的，因此上限放宽到 365 天。
+        int safeDays = Math.max(7, Math.min(days, 365));
 
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day, action, COUNT(*) AS cnt

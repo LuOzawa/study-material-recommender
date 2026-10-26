@@ -35,9 +35,17 @@ public class AnalyticsController {
         return ApiResponse.success(analyticsService.getSummaryStats());
     }
 
+    /**
+     * 看板数据。
+     *
+     * @param days 行为趋势图的时间窗口（天），默认 14。可选 7~60，
+     *             演示数据较旧时（例如答辩时数据是几个月前造的）可调大，
+     *             否则趋势图会是空白的。
+     */
     @GetMapping("/dashboard")
-    public ApiResponse<Map<String, Object>> getDashboard() {
-        return ApiResponse.success(analyticsService.getDashboardData());
+    public ApiResponse<Map<String, Object>> getDashboard(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "14") int days) {
+        return ApiResponse.success(analyticsService.getDashboardData(days));
     }
 
     @PostMapping("/clean")

@@ -24,22 +24,22 @@
 | 用户模块（注册/登录/找回/资料/收藏/评分/历史/偏好） | ✅ 已实现并验证 | JWT 无状态认证，BCrypt 存储口令 |
 | 资料模块（列表/搜索/详情/增删改/分类） | ✅ 已实现并验证 | 搜索、分类树递归、文件上传下载齐全 |
 | 推荐模块（协同过滤 + 内容推荐） | ✅ 已实现 | 4 路算法加权融合，夜间定时刷新，支持按用户刷新 |
-| 推荐反馈闭环（点赞/踩影响推荐） | ❌ **未实现** | `recommendation_feedback` 表与实体已建，但**零调用点**，无接口无前端，不影响推荐结果，详见 8.1 |
-| 数据分析模块（画像 / 热度 / 趋势 / 漏斗） | 🟡 接口齐全，**图表部分为空** | 5 个统计接口均可调用；但反馈分布、行为趋势两个图表不手工造数据就永远为空，详见 8.2 |
+| 推荐反馈闭环（点赞/踩影响推荐） | ✅ **已实现并验证** | 新增 `FeedbackService` + 3 个接口 + 前端「有用/没用」按钮；点踩的资料会被剔除出推荐列表，点赞的加权，详见第三节 |
+| 数据分析模块（画像 / 热度 / 趋势 / 漏斗） | ✅ 已实现 | 6 个统计接口；行为趋势窗口支持 `?days=`（7~365 天），旧数据也能出图，详见 8.2 |
 | Hadoop 分布式存储与计算 | 🟡 **只完成存储侧** | HDFS 客户端 + 定时 CSV 导出已实现；**没有 MapReduce/Spark 作业代码**，计算仍在单机 Python 里做 |
 | AI 大模型模块 | ✅ 代码完成，**需自备 API Key** | 4 个能力齐全；不配 `DEEPSEEK_API_KEY` 时接口返回"未启用"提示而非报错 |
 | 管理员模块 | ✅ 已实现 | 用户/资料/分类管理、批量审核、日志查看、数据快照备份 |
 | 单元测试 / 接口测试 | ❌ **仓库内没有任何测试代码** | `src/test` 不存在；文档提到的 JUnit/Postman 测试未随仓库提供 |
 | 论文中的实验数据 | ❌ 无 | 没有推荐效果评测（准确率/覆盖率/冷启动对比）的任何结果 |
-| 用户行为埋点完整性 | 🟡 仅 4 类动作有埋点 | 收藏与评论不记行为；DISLIKE / COLLECT 代码从不写入，详见 8.3 |
+| 用户行为埋点完整性 | 🟡 5 类动作有埋点（已补 COLLECT） | 收藏已补埋点；评论仍不记（`user_behaviors.action` 枚举里没有 COMMENT），详见 8.3 |
 
-**结论**：功能大致完整的可运行系统，但有三块空缺需要处理：
+**结论**：功能完整的可运行系统。此前记录的三块空缺中，**「用户反馈闭环」已补齐**，
+剩下两块：
 
-1. **Hadoop 计算**（只做了存储侧）—— 见第四节
-2. **推荐效果评测**（无任何指标）—— 见第九节
-3. **用户反馈闭环与分析埋点**（表建了但不用）—— 见 8.1 / 8.3
+1. **Hadoop 计算**（只做了存储侧，没有 MapReduce/Spark）—— 见第四节
+2. **推荐效果评测**（无 Precision/Recall 等离线指标）—— 见第九节
 
-论文若要涉及这三块，必须补代码或调整写法，否则只能就实描述。
+论文若要涉及这两块，必须补代码或调整写法，否则只能就实描述。
 
 ---
 
@@ -92,7 +92,7 @@
 │       │   ├── entity/                   #   10 个 JPA 实体
 │       │   ├── repository/               #   11 个 Repository
 │       │   ├── security/                 #   JwtUtil / JwtFilter / UserDetailsService
-│       │   └── service/                  #   10 个业务服务
+│       │   └── service/                  #   11 个业务服务（含 FeedbackService）
 │       └── resources/
 │           ├── application.yml           #   全部配置外置为环境变量
 │           └── logback-spring.xml
@@ -102,7 +102,7 @@
 │   ├── vite.config.js                    #   开发代理 /api → localhost:8080
 │   ├── index.html
 │   └── src/
-│       ├── api/                          #   axios 封装 + 7 个接口模块
+│       ├── api/                          #   axios 封装 + 7 个接口模块（含推荐反馈）
 │       ├── components/                   #   Layout / MaterialCard
 │       ├── router/  store/               #   路由与 Pinia
 │       └── views/                        #   9 个页面 + admin/ 2 个管理页
@@ -165,7 +165,24 @@
 **设计说明**：融合发生在离线，排序重排发生在线。这样用户改了偏好设置不必等
 下一次批量刷新就能立刻看到效果。
 
-### 3.3 触发方式
+### 3.3 在线重排的权重（含用户反馈）
+
+`RecommendationService.applyPreference()` 对候选列表逐条打分后再排序：
+
+| 因素 | 权重 |
+| --- | --- |
+| 原始名次 | `列表长度 − 下标`（保证有基础序） |
+| 命中偏好分类 | **+2.0** |
+| 命中偏好标签 | **+0.9 / 个** |
+| 命中屏蔽标签 | **−2.0 / 个** |
+| **用户点过「有用」** | **+1.5** |
+| **用户点过「没用」** | **−5.0 且从结果中剔除** |
+| 最终条数 | 用户偏好里的 `topN` |
+
+「没用」的惩罚刻意大于偏好分类的 +2.0，体现「明确否定优先于模糊偏好」。
+剔除后若列表为空，会回退为「只降权不剔除」，避免推荐结果一片空白。
+
+### 3.4 触发方式
 
 | 场景 | 触发点 |
 | --- | --- |
@@ -307,10 +324,13 @@ python run_recommendation.py --user-id 2     # 只刷某个用户
 | GET | `/public` | 公开（热门榜） |
 | GET | `` | 登录（个性化） |
 | POST | `/refresh` | 登录 |
+| POST | `/{materialId}/feedback` | 登录（body: `{"feedback":"LIKE"}` 或 `"DISLIKE"`） |
+| DELETE | `/{materialId}/feedback` | 登录（撤销） |
+| GET | `/feedback` | 登录（当前用户全部反馈 + 全局统计） |
 
-> ⚠️ **没有反馈接口**。任务书写的「点赞/踩反馈优化推荐」在本项目中只有表结构，
-> 无任何 `/feedback` 端点（详见 8.1）。上表的 `/api/materials/{id}/like`
-> 是资料点赞，与推荐反馈无关，不会影响推荐结果。
+> 注意区分两种「点赞」：
+> - `/api/materials/{id}/like` 是**资料点赞**，只影响该资料的点赞数，不参与推荐排序
+> - `/api/recommendations/{id}/feedback` 是**推荐反馈**，直接决定这条推荐是否还会出现
 
 ### AI `/api/ai`（均需登录）
 
@@ -359,70 +379,97 @@ CORS 白名单     → Access-Control-Allow-Origin 正确回传   ✅
 
 ## 八、已知问题与限制
 
-### 8.1 「用户反馈优化推荐」未实现（功能缺口）
+### 8.1 推荐反馈闭环（本次已补齐）
 
-任务书功能清单写了「用户反馈优化推荐结果（点赞/踩）」，代码里**没有这条链路**：
+**原状况**：`recommendation_feedback` 表、实体、Repository 都在，但**全项目没有任何写入调用**，
+也没有接口和前端按钮。推荐结果只受离线算法分数与用户偏好影响，用户点踩不会产生任何效果——
+这是任务书功能清单里明确列出的一项，属于实质性功能缺口。
 
-| 环节 | 状态 |
+**已补齐的链路**：
+
+| 环节 | 实现 |
 | --- | --- |
-| `recommendation_feedback` 表 | ✅ 存在 |
-| `RecommendationFeedback` 实体 + Repository | ✅ 存在 |
-| 写入接口（Controller / Service） | ❌ **零调用点**，全项目搜不到一次 `save` |
-| 前端「踩」按钮 | ❌ 不存在 |
-| 反馈影响推荐排序 | ❌ `RecommendationService` 只读 `recommendations` 表与用户偏好，从不读反馈 |
+| 写入服务 | `FeedbackService.submit()`：同一用户同一资料只保留一条，重复提交视为切换 |
+| 撤销 | `FeedbackService.cancel()` |
+| 接口 | `POST /api/recommendations/{materialId}/feedback`（body: `{"feedback":"LIKE"}` / `"DISLIKE"`）<br>`DELETE /api/recommendations/{materialId}/feedback`<br>`GET /api/recommendations/feedback`（当前用户全部反馈） |
+| 在线重排 | `RecommendationService.applyPreference()`：一次查出该用户全部反馈后传入，<br>`LIKE` 加权 **+1.5**，`DISLIKE` 降权 **−5.0** 并从推荐中**剔除**（若剔除后为空则回退为保留，避免列表变空） |
+| 前端 | 资料详情页「互动操作」下方新增「这条推荐对你有帮助吗？」+ 有用 / 没用两个按钮，<br>当前状态高亮，再点一次即撤销 |
+| 报表 | 管理端「推荐反馈分布」饼图读的就是这张表，现在会随真实反馈增长 |
 
-也就是说：**表建了、实体写了、但从没被用过**。推荐结果不会因为用户点踩而变化。
+**实测效果**（临时库）：
 
-### 8.2 两个分析图表结构性无数据
-
-管理端分析页有 4 个图表，其中 2 个**不手工插数据就永远是空的**：
-
-| 图表 | 数据来源 | 为何为空 |
-| --- | --- | --- |
-| 推荐反馈分布 | `recommendation_feedback` | 没有任何代码写入这张表 |
-| 行为趋势（含 dislike / collect 两条线） | `user_behaviors` 的 `DISLIKE` / `COLLECT` | 这两个枚举值**从未被代码写入**（只写 VIEW/LIKE/RATE/DOWNLOAD） |
-
-另外**行为趋势图窗口写死为 14 天**：
-
-```java
-// AnalyticsService.java:35
-data.put("behaviorTrend", getBehaviorTrend(14));
-// :125  safeDays = Math.max(7, Math.min(days, 60));  → 只查最近 14 天
+```
+推荐列表 10 条： [13, 26, 3, 23, 15, 25, 27, 2, 14, ...]
+对资料 13 点「没用」→ 库中写入 user_id=2 material_id=13 DISLIKE
+再取推荐列表        → 9 条，资料 13 已被剔除
+撤销反馈            → 资料 13 回到第 1 位
 ```
 
-而演示数据最晚到 `2026-04-21`。日期一过，这个图就空白了。
-**建议改成可配置窗口**（如 `?days=` 参数）或在答辩前重新造一批近期数据。
+### 8.2 分析图表的数据可见性（已修）
 
-### 8.3 行为埋点覆盖不全
+> **更正**：早前这节写的是「反馈分布、行为趋势两个图表恒为空」，核对种子数据后发现不准确——
+> `init.sql` 里其实带着 6 条反馈（4 LIKE / 2 DISLIKE）和历史行为
+> （VIEW 42 / RATE 18 / LIKE 15 / COLLECT 12 / DOWNLOAD 6 / DISLIKE 3），图表是能出数据的。
+> 真正的问题有两个：**反馈表没有写入路径所以数据不会增长**（已由 8.1 解决），
+> 以及**行为趋势窗口写死 14 天**。
 
-`user_behaviors` 只记录了 4 种动作，两类重要交互完全没埋点：
+原实现：
 
-| 操作 | 是否记行为 | 后果 |
+```java
+// AnalyticsService
+data.put("behaviorTrend", getBehaviorTrend(14));      // 窗口写死 14 天
+int safeDays = Math.max(7, Math.min(days, 60));       // 且上限只到 60 天
+```
+
+演示数据最晚到 `2026-04-21`，等答辩时日期一过，这个图就空白了。
+
+**已改为可配置**：
+
+```java
+// AnalyticsService
+public Map<String, Object> getDashboardData(int trendDays) { ... }
+int safeDays = Math.max(7, Math.min(days, 365));      // 上限放宽到 365 天
+```
+
+```
+GET /api/analytics/dashboard              → 默认 14 天
+GET /api/analytics/dashboard?days=365     → 覆盖近一年，旧演示数据也能出图
+```
+
+实测 `?days=365` 返回 365 个数据点，其中 5 天有数据
+（如 `2026-03-27`：view 28 / like 10 / dislike 3 / collect 9 / rate 14 / download 6）。
+
+### 8.3 行为埋点覆盖情况
+
+| 操作 | 是否记行为 | 说明 |
 | --- | --- | --- |
 | 浏览详情 VIEW | ✅ | — |
 | 点赞 LIKE | ✅ 仅「加赞」记，「取消赞」不记 | 行为数 ≠ 当前点赞数 |
 | 评分 RATE | ✅ | — |
 | 下载 DOWNLOAD | ✅ | — |
-| **收藏 / 取消收藏** | ❌ `toggleFavorite()` 无埋点 | 收藏量无法从行为反推 |
-| **发表评论** | ❌ `addComment()` 无埋点 | 评论量无法从行为反推 |
-| 点踩 DISLIKE | ❌ 代码从不写 | 图表恒为 0 |
-| 收藏 COLLECT | ❌ 代码从不写 | 图表恒为 0 |
+| 收藏 | ✅ **本次补上** | `toggleFavorite()` 加赞时写 `COLLECT` 行为（取消收藏不记，与点赞一致） |
+| 点踩 DISLIKE | 🟡 部分 | `user_behaviors` 的 DISLIKE 代码仍不写入；推荐反馈已改走 `recommendation_feedback`（8.1） |
+| 发表评论 | ❌ 仍不记 | `user_behaviors.action` 是 ENUM，没有 `COMMENT` 值；要补需先 `ALTER TABLE` 加枚举值，本次未动表结构 |
 
-如果论文要写「用户行为分析」，这块埋点需要补齐，否则分析维度是残缺的。
+实测：收藏一条资料后 `COLLECT` 行为数 11 → 12。
+
+> 如果论文要写「用户行为分析」的评论维度，需要给 `action` 枚举加 `COMMENT` 并补一行埋点。
 
 ### 8.4 种子数据（`sql/init.sql`）说明
 
 `init.sql` 是 **2026-03-29 的快照**，里面有几处不是自然产生的数据，看代码时不要被误导：
 
-| 字段/表 | 现象 | 原因 |
+| 字段/表 | 实际数据 | 说明 |
 | --- | --- | --- |
-| `materials.view_count` | 合计 302,813，而真实 VIEW 行为只有 44 条 | 数字是手工灌的，为了让热门排序好看 |
-| `user_behaviors` 中的 `DISLIKE` 行 | 存在 1 条（2026-04-21） | 代码不会写这个值，属手工插入（大概为了分析页截图） |
-| `recommendations` | 0 行 | 推荐脚本从未成功跑过，或跑完后被清空 |
-| `recommendation_feedback` | 0 行 | 无写入路径（见 8.1） |
-| 时间戳 | 全部集中在 2026-03-23 ~ 2026-04-21 | 导入后行为趋势图（14 天窗口）会是空的 |
+| `materials.view_count` | 合计 302,813 | 而真实 VIEW 行为只有 44 条，数字明显是手工灌的，为了让热门排序好看 |
+| `user_behaviors` 动作分布 | VIEW 42 / RATE 18 / LIKE 15 / COLLECT 12 / DOWNLOAD 6 / DISLIKE 3 | 都来自种子里手工造的数据；**代码本身只写 VIEW/LIKE/RATE/DOWNLOAD/COLLECT**，不写 DISLIKE |
+| `recommendation_feedback` | **6 行**（4 LIKE / 2 DISLIKE） | 种子里自带。此前本文写成「0 行」是错的——代码虽无写入路径，但数据是有的（写入路径已在 8.1 补齐） |
+| `recommendations` | 0 行 | 推荐脚本从未成功跑过，或跑完后被清空。因此个性化推荐会走「热门榜 + 偏好重排」的兜底分支 |
+| `material_comments` | 8 行 | 种子里自带 |
+| 时间戳 | 全部集中在 2026-03-23 ~ 2026-04-21 | 距今已超过默认的 14 天窗口，所以**打开分析页看趋势图会是空的**，需要传 `?days=365`（见 8.2） |
 
-导入后如果想看到有数据的图表，需要自己补一批近期的 `user_behaviors` 记录。
+导入后如果想看到「近期」的趋势曲线，需要自己补一批当月的 `user_behaviors` 记录，
+或者直接用 `GET /api/analytics/dashboard?days=365` 把窗口拉长。
 
 ### 8.5 其他
 
@@ -441,22 +488,20 @@ data.put("behaviorTrend", getBehaviorTrend(14));
 
 ## 九、后续工作建议
 
-1. **补用户反馈闭环**（功能缺口，改动最小）：`recommendation_feedback` 表已建好，
-   只需加一个 `POST /api/recommendations/{materialId}/feedback` + 前端两个按钮，
-   再在 `RecommendationService.applyPreference()` 里对点踩过的资料降权即可。
-   半天工作量，但能补上任务书明确列出的一项功能。
-2. **补测试**：至少给 `AuthService`、`MaterialService`、`RecommendationService`
-   写 JUnit + MockMvc，覆盖注册/登录/权限/越权四类用例。
-3. **补推荐评测**：用留一法（leave-one-out）在现有 102 条行为上算
-   Precision@5 / Recall@5 / NDCG，做「单算法 vs 融合」对比表——这是论文第 5 章最省力的素材。
-4. **补 Hadoop 计算**：写一个 MapReduce 或 Spark 作业，把 `dt=*` 分区 CSV 聚合成
+> 原先排在第 1 位的「补用户反馈闭环」已在本次完成（见 8.1），下面按剩余项排序。
+
+1. **补推荐效果评测**：用留一法（leave-one-out）在现有 102 条行为上算
+   Precision@5 / Recall@5 / NDCG，做「单算法 vs 融合」对比表。
+   有了 8.1 的反馈闭环，还可以再加一组「开启反馈 vs 关闭反馈」的对比——
+   这是论文第 5 章最省力的素材。
+2. **补 Hadoop 计算**：写一个 MapReduce 或 Spark 作业，把 `dt=*` 分区 CSV 聚合成
    「资料热度 Top100」，与 MySQL 直接查做耗时对比，才有「Hadoop 必要性」的论据。
-5. **把行为趋势图窗口改成可配置**（见 8.2）：一行改动，`/api/analytics/dashboard?days=90`，
-   否则答辩演示时那个图永远是空白的。
-6. **补埋点**（见 8.3）：在 `toggleFavorite()` 和 `addComment()` 里各加一行
-   `behaviorRepository.save(...)`，让分析维度完整。
-7. **造数据**：4 个用户撑不起协同过滤。用脚本生成 200~500 个模拟用户、数千条行为，
-   再跑评测才有统计意义。
+3. **补测试**：至少给 `AuthService`、`MaterialService`、`RecommendationService`、
+   `FeedbackService` 写 JUnit + MockMvc，覆盖注册/登录/权限/越权四类用例。
+4. **给评论补埋点**：给 `user_behaviors.action` 枚举加 `COMMENT`，
+   在 `addComment()` 里写一行，分析维度就完整了（见 8.3）。
+5. **造数据**：4 个用户、31 条资料撑不起协同过滤。用脚本生成 200~500 个模拟用户、
+   数千条行为，再跑评测才有统计意义。
 
 ---
 

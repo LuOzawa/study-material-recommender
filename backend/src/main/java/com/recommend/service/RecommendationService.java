@@ -25,6 +25,14 @@ public class RecommendationService {
     private final RecommendationRepository recommendationRepository;
     private final MaterialRepository materialRepository;
     private final UserPreferenceService preferenceService;
+    /** 用户反馈（点赞/点踩），用于在线重排 */
+    private final FeedbackService feedbackService;
+
+    /** 点过「有用」的加权 */
+    private static final double FEEDBACK_LIKE_BONUS = 1.5;
+
+    /** 点过「没用」的降权（比偏好权重的 2.0 更重，体现明确否定） */
+    private static final double FEEDBACK_DISLIKE_PENALTY = 5.0;
 
     @Value("${recommendation.python-script}")
     private String pythonScript;
@@ -39,8 +47,12 @@ public class RecommendationService {
         List<Recommendation> recs = recommendationRepository
                 .findByUserIdOrderByScoreDesc(userId, PageRequest.of(0, fetchSize));
 
+        // 一次性取出该用户的全部反馈，避免在重排循环里逐条查库
+        Map<Long, com.recommend.entity.RecommendationFeedback.FeedbackType> feedbackMap =
+                feedbackService.mapByUser(userId);
+
         if (recs.isEmpty()) {
-            List<Material> fallback = applyPreference(getHotMaterials(fetchSize), preference);
+            List<Material> fallback = applyPreference(getHotMaterials(fetchSize), preference, feedbackMap);
             fallback.forEach(material -> {
                 material.setRecommendationAlgorithm("HOT");
                 material.setRecommendationScore(null);
@@ -77,7 +89,7 @@ public class RecommendationService {
             material.setRecommendationScore(rec.getScore());
         });
 
-        return applyPreference(materials, preference);
+        return applyPreference(materials, preference, feedbackMap);
     }
 
     /**
@@ -97,10 +109,13 @@ public class RecommendationService {
     }
 
     private List<Material> applyPreference(List<Material> materials,
-                                           UserPreferenceService.PreferenceData preference) {
+                                           UserPreferenceService.PreferenceData preference,
+                                           Map<Long, com.recommend.entity.RecommendationFeedback.FeedbackType> feedbackMap) {
         if (materials == null || materials.isEmpty()) {
             return materials;
         }
+        Map<Long, com.recommend.entity.RecommendationFeedback.FeedbackType> feedback =
+                feedbackMap == null ? Map.of() : feedbackMap;
 
         List<ScoredMaterial> scored = new java.util.ArrayList<>();
         for (int i = 0; i < materials.size(); i++) {
@@ -120,17 +135,37 @@ public class RecommendationService {
                 score -= excludedMatches * 2.0;
             }
 
+            // 用户反馈闭环：点过「有用」加权，点过「没用」重罚
+            com.recommend.entity.RecommendationFeedback.FeedbackType fb = feedback.get(material.getId());
+            if (fb == com.recommend.entity.RecommendationFeedback.FeedbackType.LIKE) {
+                score += FEEDBACK_LIKE_BONUS;
+            } else if (fb == com.recommend.entity.RecommendationFeedback.FeedbackType.DISLIKE) {
+                score -= FEEDBACK_DISLIKE_PENALTY;
+            }
+
             scored.add(new ScoredMaterial(material, score, i));
         }
 
-        return scored.stream()
+        List<ScoredMaterial> sorted = scored.stream()
                 .sorted((a, b) -> {
                     int byScore = Double.compare(b.score, a.score);
                     if (byScore != 0) return byScore;
                     return Integer.compare(a.originalIndex, b.originalIndex);
                 })
-                .limit(preference.topN())
+                .collect(Collectors.toList());
+
+        // 「不感兴趣」的资料直接剔除；若剔除后为空则回退为不剔除，避免推荐列表变空
+        List<Material> filtered = sorted.stream()
+                .filter(item -> feedback.get(item.material.getId())
+                        != com.recommend.entity.RecommendationFeedback.FeedbackType.DISLIKE)
                 .map(item -> item.material)
+                .collect(Collectors.toList());
+        List<Material> picked = filtered.isEmpty()
+                ? sorted.stream().map(item -> item.material).collect(Collectors.toList())
+                : filtered;
+
+        return picked.stream()
+                .limit(preference.topN())
                 .collect(Collectors.toList());
     }
 

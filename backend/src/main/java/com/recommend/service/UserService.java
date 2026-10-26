@@ -77,6 +77,17 @@ public class UserService {
             fav.setUserId(userId);
             fav.setMaterialId(materialId);
             favoriteRepository.save(fav);
+
+            /*
+             * 原实现收藏不记行为，导致 user_behaviors 里始终没有 COLLECT 记录，
+             * 分析页的「行为趋势」和「转化漏斗」缺一条线。
+             * 这里补上埋点（取消收藏不记，与点赞的处理保持一致）。
+             */
+            UserBehavior behavior = new UserBehavior();
+            behavior.setUserId(userId);
+            behavior.setMaterialId(materialId);
+            behavior.setAction(UserBehavior.Action.COLLECT);
+            behaviorRepository.save(behavior);
             return true;
         }
     }

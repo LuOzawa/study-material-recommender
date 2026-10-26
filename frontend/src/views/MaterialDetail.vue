@@ -121,6 +121,27 @@
                   下载资料
                 </el-button>
               </div>
+
+              <!-- 推荐反馈：告诉系统这条推荐是否合适，会直接影响后续推荐排序 -->
+              <div class="feedback-row">
+                <span class="feedback-label">这条推荐对你有帮助吗？</span>
+                <el-button
+                  size="small"
+                  :type="feedback === 'LIKE' ? 'success' : 'default'"
+                  plain
+                  @click="handleFeedback('LIKE')"
+                >
+                  有用
+                </el-button>
+                <el-button
+                  size="small"
+                  :type="feedback === 'DISLIKE' ? 'danger' : 'default'"
+                  plain
+                  @click="handleFeedback('DISLIKE')"
+                >
+                  没用
+                </el-button>
+              </div>
             </el-card>
 
             <el-card class="side-card" shadow="never">
@@ -169,6 +190,7 @@ import {
   toggleLike
 } from '@/api/materials'
 import { summarize } from '@/api/ai'
+import { cancelFeedback, getMyFeedback, submitFeedback } from '@/api/recommendations'
 import { useAuthStore } from '@/store/auth'
 
 const route = useRoute()
@@ -184,6 +206,8 @@ const likes = ref({ liked: false, likeCount: 0 })
 const comments = ref([])
 const commentInput = ref('')
 const postingComment = ref(false)
+/** 当前用户对这条资料的推荐反馈：'LIKE' / 'DISLIKE' / '' */
+const feedback = ref('')
 
 const coverGradients = [
   'linear-gradient(135deg, #1e63ff 0%, #4b88ff 48%, #8db8ff 100%)',
@@ -244,7 +268,7 @@ async function loadMaterial() {
   try {
     const res = await getMaterial(route.params.id)
     material.value = res.data
-    await Promise.all([loadInteractionState(), loadComments()])
+    await Promise.all([loadInteractionState(), loadComments(), loadFeedback()])
   } finally {
     loading.value = false
   }
@@ -296,6 +320,43 @@ async function handleFavorite() {
   const res = await toggleFavorite(route.params.id)
   favorited.value = !!res.data?.favorited
   ElMessage.success(favorited.value ? '已收藏' : '已取消收藏')
+}
+
+async function handleFeedback(type) {
+  if (!isLoggedIn.value) {
+    ElMessage.warning('请先登录后反馈')
+    router.push('/login')
+    return
+  }
+  try {
+    if (feedback.value === type) {
+      // 再点一次 = 撤销
+      await cancelFeedback(route.params.id)
+      feedback.value = ''
+      ElMessage.success('已撤销反馈')
+    } else {
+      const res = await submitFeedback(route.params.id, type)
+      feedback.value = res.data?.feedback || type
+      ElMessage.success(
+        feedback.value === 'LIKE' ? '已记录：这条推荐有用' : '已记录：这条推荐没用，之后会减少推荐'
+      )
+    }
+  } catch (e) {
+    // 错误提示由 axios 拦截器统一处理
+  }
+}
+
+async function loadFeedback() {
+  if (!isLoggedIn.value) {
+    feedback.value = ''
+    return
+  }
+  try {
+    const res = await getMyFeedback()
+    feedback.value = res.data?.mine?.[String(route.params.id)] || ''
+  } catch (e) {
+    feedback.value = ''
+  }
 }
 
 async function handleDownload() {
@@ -626,6 +687,21 @@ watch(() => route.params.id, loadMaterial)
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
+}
+
+.feedback-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #e3e8f0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.feedback-label {
+  font-size: 12px;
+  color: #7b8aa0;
 }
 
 .summary-text {
