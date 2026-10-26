@@ -206,10 +206,13 @@ python seed_synthetic_users.py --users 200        # 加 --apply 才真写
 │   └── requirements.txt
 │
 ├── sql/
-│   ├── init.sql                          # 完整建库脚本（⚠️ 见文件头警示：会 DROP 重建）
+│   ├── init.sql                              # 完整建库脚本（⚠️ 见文件头警示：会 DROP 重建）
 │   └── user_preferences.sql              # 推荐偏好表（幂等，可重复执行）
 │
-├── 功能清单_技术栈.md                      # 原始任务书功能拆解
+├── docs/
+│   ├── 功能清单.md                       # 原始任务书功能拆解
+│   ├── 启动说明.md                       # 环境配置与运行步骤
+│   └── 部署说明.md                       # 打包与部署总结
 ├── .env.example                          # 环境变量模板
 └── README.md
 ```
@@ -579,7 +582,7 @@ export PATH=/tmp/hadoop-win/bin:$PATH
 ### 6.2 初始化数据库
 
 ```bash
-# ⚠️ init.sql 会 DROP 并重建 recommend_db 下的所有表
+# ⚠️ sql/init.sql 会 DROP 并重建 recommend_db 下的所有表
 #    如果该库已有数据，先备份：
 mysqldump -u root -p --databases recommend_db > backup_$(date +%F).sql
 
@@ -748,7 +751,7 @@ CORS 白名单     → Access-Control-Allow-Origin 正确回传   ✅
 ### 9.2 分析图表的数据可见性（已修）
 
 > **更正**：早前这节写的是「反馈分布、行为趋势两个图表恒为空」，核对种子数据后发现不准确——
-> `init.sql` 里其实带着 6 条反馈（4 LIKE / 2 DISLIKE）和历史行为
+> `sql/init.sql` 里其实带着 6 条反馈（4 LIKE / 2 DISLIKE）和历史行为
 > （VIEW 42 / RATE 18 / LIKE 15 / COLLECT 12 / DOWNLOAD 6 / DISLIKE 3），图表是能出数据的。
 > 真正的问题有两个：**反馈表没有写入路径所以数据不会增长**（已由 8.1 解决），
 > 以及**行为趋势窗口写死 14 天**。
@@ -797,7 +800,7 @@ GET /api/analytics/dashboard?days=365     → 覆盖近一年，旧演示数据�
 
 ### 9.4 种子数据（`sql/init.sql`）说明
 
-`init.sql` 是 **2026-03-29 的快照**，里面有几处不是自然产生的数据，看代码时不要被误导：
+`sql/init.sql` 是 **2026-03-29 的快照**，里面有几处不是自然产生的数据，看代码时不要被误导：
 
 | 字段/表 | 实际数据 | 说明 |
 | --- | --- | --- |
