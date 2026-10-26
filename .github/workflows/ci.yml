@@ -26,7 +26,7 @@ jobs:
           java-version: '17'
           cache: maven
       - name: Test
-        run: mvn -B -q test
+        run: mvn -B test
       - name: Package
         run: mvn -B -q -DskipTests package
   frontend:
